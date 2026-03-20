@@ -42,6 +42,10 @@ target_include_directories(${PLUGIN_NAME} INTERFACE
 target_link_libraries(${PLUGIN_NAME} PRIVATE flutter)
 target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::GTK)
 
+# libjpeg is required for MJPEG camera stream decoding.
+find_package(JPEG REQUIRED)
+target_link_libraries(${PLUGIN_NAME} PRIVATE JPEG::JPEG)
+
 # List of absolute paths to libraries that should be bundled with the plugin.
 # This list could contain prebuilt libraries, or libraries created by an
 # external build triggered from this build file.

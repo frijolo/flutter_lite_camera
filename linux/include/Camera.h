@@ -86,7 +86,7 @@ public:
     Camera();
     ~Camera();
 #elif __linux__
-    Camera() : frameWidth(640), frameHeight(480), fd(-1), buffers(nullptr), bufferCount(0) {}
+    Camera() : frameWidth(640), frameHeight(480), fd(-1), buffers(nullptr), bufferCount(0), pixelFormat(0) {}
     ~Camera() { Release(); }
 #elif __APPLE__
     Camera() noexcept; // Add noexcept to match the implementation
@@ -116,6 +116,7 @@ private:
     int fd;
     Buffer *buffers;
     unsigned int bufferCount;
+    uint32_t pixelFormat; // actual negotiated V4L2 pixel format (set in Open())
 
     bool InitDevice();
     void UninitDevice();
