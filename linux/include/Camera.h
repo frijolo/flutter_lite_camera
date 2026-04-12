@@ -71,6 +71,7 @@ struct CAMERA_API CaptureDeviceInfo
 #else
     char friendlyName[512]; // Narrow characters for Linux/macOS
 #endif
+    int deviceNumber; // actual /dev/videoN index (Linux) or system device index
 };
 
 // Exported functions

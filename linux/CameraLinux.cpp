@@ -25,6 +25,34 @@ static unsigned char clampU8(double value)
 
 // Converts a YUYV (YUY2) buffer to RGB888.
 // Output order: R, G, B (one byte each per pixel).
+
+// Converts an NV12 (semi-planar YUV 4:2:0) buffer to RGB888.
+// Layout: Y plane (width*height bytes) followed by interleaved UV plane
+// ((width*height/2) bytes, U first then V for each 2x2 block).
+static void ConvertNV12ToRGB(const unsigned char *nv12Data,
+                               unsigned char *rgbData,
+                               int width, int height)
+{
+    const unsigned char *yPlane  = nv12Data;
+    const unsigned char *uvPlane = nv12Data + width * height;
+
+    int dstIdx = 0;
+    for (int row = 0; row < height; row++)
+    {
+        for (int col = 0; col < width; col++)
+        {
+            int y      = yPlane[row * width + col];
+            int uvBase = (row / 2) * width + (col & ~1);
+            int u      = uvPlane[uvBase];
+            int v      = uvPlane[uvBase + 1];
+
+            rgbData[dstIdx++] = clampU8(y + 1.402   * (v - 128));
+            rgbData[dstIdx++] = clampU8(y - 0.34414 * (u - 128) - 0.71414 * (v - 128));
+            rgbData[dstIdx++] = clampU8(y + 1.772   * (u - 128));
+        }
+    }
+}
+
 static void ConvertYUY2ToRGB(const unsigned char *yuy2Data,
                                unsigned char *rgbData,
                                int width, int height)
@@ -159,15 +187,18 @@ bool Camera::Open(int cameraIndex)
         std::cout << "Negotiated format: YUYV " << frameWidth << "x" << frameHeight << std::endl;
     else if (pixelFormat == V4L2_PIX_FMT_MJPEG)
         std::cout << "Negotiated format: MJPEG " << frameWidth << "x" << frameHeight << std::endl;
+    else if (pixelFormat == V4L2_PIX_FMT_NV12)
+        std::cout << "Negotiated format: NV12 " << frameWidth << "x" << frameHeight << std::endl;
     else
     {
-        // Try to force MJPEG as a fallback when the requested format is unknown.
+        // Try MJPEG as first fallback.
         memset(&fmt, 0, sizeof(fmt));
         fmt.type                = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         fmt.fmt.pix.width       = frameWidth;
         fmt.fmt.pix.height      = frameHeight;
         fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG;
-        if (ioctl(fd, VIDIOC_S_FMT, &fmt) == 0)
+        if (ioctl(fd, VIDIOC_S_FMT, &fmt) == 0 &&
+            fmt.fmt.pix.pixelformat == V4L2_PIX_FMT_MJPEG)
         {
             frameWidth  = fmt.fmt.pix.width;
             frameHeight = fmt.fmt.pix.height;
@@ -176,8 +207,25 @@ bool Camera::Open(int cameraIndex)
         }
         else
         {
-            std::cerr << "Unknown pixel format 0x" << std::hex << pixelFormat
-                      << std::dec << " — frames may appear corrupted." << std::endl;
+            // Try NV12 as second fallback (common on Intel IPU6 / iSys cameras).
+            memset(&fmt, 0, sizeof(fmt));
+            fmt.type                = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            fmt.fmt.pix.width       = frameWidth;
+            fmt.fmt.pix.height      = frameHeight;
+            fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_NV12;
+            if (ioctl(fd, VIDIOC_S_FMT, &fmt) == 0 &&
+                fmt.fmt.pix.pixelformat == V4L2_PIX_FMT_NV12)
+            {
+                frameWidth  = fmt.fmt.pix.width;
+                frameHeight = fmt.fmt.pix.height;
+                pixelFormat = fmt.fmt.pix.pixelformat;
+                std::cout << "Negotiated format: NV12 (fallback) " << frameWidth << "x" << frameHeight << std::endl;
+            }
+            else
+            {
+                std::cerr << "Unknown pixel format 0x" << std::hex << pixelFormat
+                          << std::dec << " — frames may appear corrupted." << std::endl;
+            }
         }
     }
 
@@ -276,6 +324,10 @@ FrameData Camera::CaptureFrame()
             std::cerr << "MJPEG decode failed — blank frame." << std::endl;
             memset(frame.rgbData, 0, frame.size);
         }
+    }
+    else if (pixelFormat == V4L2_PIX_FMT_NV12)
+    {
+        ConvertNV12ToRGB(rawData, frame.rgbData, frameWidth, frameHeight);
     }
     else
     {
@@ -434,7 +486,11 @@ std::vector<CaptureDeviceInfo> ListCaptureDevices()
 {
     std::vector<CaptureDeviceInfo> devices;
 
-    for (int i = 0; i < 10; ++i)
+    // Scan /dev/video0 … /dev/video127. Most nodes won't exist (open returns
+    // ENOENT) so the loop is fast. Drivers like Intel IPU6/iSys expose many
+    // metadata-only nodes at low indices and the real capture node at a high
+    // index (e.g. /dev/video48), so we must scan beyond the first 10.
+    for (int i = 0; i < 128; ++i)
     {
         std::string devicePath = "/dev/video" + std::to_string(i);
         int devFd = open(devicePath.c_str(), O_RDWR | O_NONBLOCK, 0);
@@ -450,6 +506,7 @@ std::vector<CaptureDeviceInfo> ListCaptureDevices()
                         reinterpret_cast<const char *>(cap.card),
                         sizeof(deviceInfo.friendlyName) - 1);
                 deviceInfo.friendlyName[sizeof(deviceInfo.friendlyName) - 1] = '\0';
+                deviceInfo.deviceNumber = i;
                 devices.push_back(deviceInfo);
             }
         }

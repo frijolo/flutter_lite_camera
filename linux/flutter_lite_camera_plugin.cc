@@ -87,9 +87,21 @@ static void flutter_lite_camera_plugin_handle_method_call(
 
     if (index)
     {
-      int index_int = fl_value_get_int(index);
-      bool success = self->camera->Open(index_int);
-      response = FL_METHOD_RESPONSE(fl_method_success_response_new(fl_value_new_bool(success)));
+      int list_index = fl_value_get_int(index);
+      // Re-enumerate to map the list position to the actual /dev/videoN number.
+      // getDeviceList() and open() may be called separately, so we re-scan
+      // rather than caching — the scan is fast (mostly ENOENT returns).
+      std::vector<CaptureDeviceInfo> devices = ListCaptureDevices();
+      if (list_index >= 0 && list_index < static_cast<int>(devices.size()))
+      {
+        bool success = self->camera->Open(devices[list_index].deviceNumber);
+        response = FL_METHOD_RESPONSE(fl_method_success_response_new(fl_value_new_bool(success)));
+      }
+      else
+      {
+        response = FL_METHOD_RESPONSE(fl_method_error_response_new(
+            "INVALID_INDEX", "Camera index out of range", nullptr));
+      }
     }
     else
     {
