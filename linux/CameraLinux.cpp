@@ -5,6 +5,7 @@
 #include <map>
 #include <csetjmp>
 #include <cstring>
+#include <poll.h>
 #include <jpeglib.h>
 
 // ---------------------------------------------------------------------------
@@ -291,6 +292,17 @@ bool Camera::SetResolution(int width, int height)
 
 FrameData Camera::CaptureFrame()
 {
+    // Wait up to 500 ms for a frame to be available before calling VIDIOC_DQBUF.
+    // Without this guard VIDIOC_DQBUF blocks indefinitely on v4l2loopback devices
+    // that have no active writer (virtual cameras with no frame producer).
+    struct pollfd pfd = {fd, POLLIN, 0};
+    int pollRet = poll(&pfd, 1, 500);
+    if (pollRet <= 0)
+    {
+        // Timeout or error — return an empty frame so the caller can retry.
+        return {};
+    }
+
     struct v4l2_buffer buf;
     memset(&buf, 0, sizeof(buf));
     buf.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
