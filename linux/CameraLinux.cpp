@@ -162,27 +162,45 @@ bool Camera::Open(int cameraIndex)
 
     std::cout << "Driver: " << cap.driver << "\nCard: " << cap.card << std::endl;
 
-    // Request YUYV format. The driver may silently negotiate a different format
-    // (e.g. MJPEG if the device doesn't support YUYV).  Read back the actual
-    // negotiated format after the ioctl so CaptureFrame() can decode correctly.
-    struct v4l2_format fmt;
-    memset(&fmt, 0, sizeof(fmt));
-    fmt.type                = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    fmt.fmt.pix.width       = frameWidth;
-    fmt.fmt.pix.height      = frameHeight;
-    fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV;
+    // Try pixel formats in preference order.  Some drivers reject VIDIOC_S_FMT
+    // with EINVAL for formats they don't support (instead of silently switching),
+    // so we iterate until one succeeds.  After a successful call, read back the
+    // negotiated format — the driver may pick a different pixelformat or
+    // resolution than requested.
+    static const uint32_t kPreferredFormats[] = {
+        V4L2_PIX_FMT_YUYV,
+        V4L2_PIX_FMT_MJPEG,
+        V4L2_PIX_FMT_NV12,
+    };
 
-    if (ioctl(fd, VIDIOC_S_FMT, &fmt) < 0)
+    bool formatSet = false;
+    struct v4l2_format fmt;
+    for (uint32_t candidate : kPreferredFormats)
     {
-        perror("Error setting format");
-        close(fd);
-        return false;
+        memset(&fmt, 0, sizeof(fmt));
+        fmt.type                = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        fmt.fmt.pix.width       = frameWidth;
+        fmt.fmt.pix.height      = frameHeight;
+        fmt.fmt.pix.pixelformat = candidate;
+
+        if (ioctl(fd, VIDIOC_S_FMT, &fmt) >= 0)
+        {
+            // Accept the resolution and format the driver actually settled on.
+            frameWidth  = fmt.fmt.pix.width;
+            frameHeight = fmt.fmt.pix.height;
+            pixelFormat = fmt.fmt.pix.pixelformat;
+            formatSet   = true;
+            break;
+        }
     }
 
-    // Accept the resolution and format the driver actually settled on.
-    frameWidth  = fmt.fmt.pix.width;
-    frameHeight = fmt.fmt.pix.height;
-    pixelFormat = fmt.fmt.pix.pixelformat;
+    if (!formatSet)
+    {
+        std::cerr << "Error setting format: no supported pixel format accepted." << std::endl;
+        close(fd);
+        fd = -1;
+        return false;
+    }
 
     if (pixelFormat == V4L2_PIX_FMT_YUYV)
         std::cout << "Negotiated format: YUYV " << frameWidth << "x" << frameHeight << std::endl;
@@ -191,44 +209,8 @@ bool Camera::Open(int cameraIndex)
     else if (pixelFormat == V4L2_PIX_FMT_NV12)
         std::cout << "Negotiated format: NV12 " << frameWidth << "x" << frameHeight << std::endl;
     else
-    {
-        // Try MJPEG as first fallback.
-        memset(&fmt, 0, sizeof(fmt));
-        fmt.type                = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        fmt.fmt.pix.width       = frameWidth;
-        fmt.fmt.pix.height      = frameHeight;
-        fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG;
-        if (ioctl(fd, VIDIOC_S_FMT, &fmt) == 0 &&
-            fmt.fmt.pix.pixelformat == V4L2_PIX_FMT_MJPEG)
-        {
-            frameWidth  = fmt.fmt.pix.width;
-            frameHeight = fmt.fmt.pix.height;
-            pixelFormat = fmt.fmt.pix.pixelformat;
-            std::cout << "Negotiated format: MJPEG (fallback) " << frameWidth << "x" << frameHeight << std::endl;
-        }
-        else
-        {
-            // Try NV12 as second fallback (common on Intel IPU6 / iSys cameras).
-            memset(&fmt, 0, sizeof(fmt));
-            fmt.type                = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-            fmt.fmt.pix.width       = frameWidth;
-            fmt.fmt.pix.height      = frameHeight;
-            fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_NV12;
-            if (ioctl(fd, VIDIOC_S_FMT, &fmt) == 0 &&
-                fmt.fmt.pix.pixelformat == V4L2_PIX_FMT_NV12)
-            {
-                frameWidth  = fmt.fmt.pix.width;
-                frameHeight = fmt.fmt.pix.height;
-                pixelFormat = fmt.fmt.pix.pixelformat;
-                std::cout << "Negotiated format: NV12 (fallback) " << frameWidth << "x" << frameHeight << std::endl;
-            }
-            else
-            {
-                std::cerr << "Unknown pixel format 0x" << std::hex << pixelFormat
-                          << std::dec << " — frames may appear corrupted." << std::endl;
-            }
-        }
-    }
+        std::cerr << "Unknown pixel format 0x" << std::hex << pixelFormat
+                  << std::dec << " — frames may appear corrupted." << std::endl;
 
     if (!InitDevice() || !StartCapture())
     {
